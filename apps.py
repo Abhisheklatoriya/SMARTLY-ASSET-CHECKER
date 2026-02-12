@@ -1,100 +1,78 @@
 import streamlit as st
 import dropbox
-import hmac
+import re
 import pandas as pd
 
-# --- 1. ACCESS CONTROL (Secrets) ---
-def check_password():
-    def password_entered():
-        if hmac.compare_digest(st.session_state["password"], st.secrets["APP_PASSWORD"]):
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
-    if st.session_state.get("password_correct", False): return True
-    st.title("🔒 Private Asset Checker")
-    st.text_input("App Password", type="password", on_change=password_entered, key="password")
-    return False
+# --- LOGIC: SPLITTING BULK TEXT ---
+def split_filenames(text):
+    # Regex finds anything ending in .mp4, .png, .jpg, etc., even if they are stuck together
+    pattern = r'[\w\s\.\+\$\-]+?\.(?:mp4|png|jpg|jpeg|mov)'
+    matches = re.findall(pattern, text)
+    return [m.strip() for m in matches]
 
-if not check_password(): st.stop()
-
-# --- 2. DROPBOX LOGIC ---
-def get_dropbox_preview(dbx, file_path):
-    """Generates a temporary link to preview/display the file."""
+# --- LOGIC: DROPBOX PREVIEW ---
+def get_direct_link(dbx, path):
     try:
-        # Get a direct link for image/video rendering
-        link_res = dbx.files_get_temporary_link(file_path)
-        return link_res.link
-    except:
+        # This returns a link that expires in 4 hours, perfect for a secure preview
+        link_metadata = dbx.files_get_temporary_link(path)
+        return link_metadata.link
+    except Exception as e:
         return None
 
-def scan_dropbox_folder(token, folder_path):
-    dbx = dropbox.Dropbox(token)
-    try:
-        # List files in the "Asset checker" folder
-        res = dbx.files_list_folder(folder_path)
-        # Create a dictionary of {filename: full_path}
-        return {entry.name: entry.path_display for entry in res.entries if isinstance(entry, dropbox.files.FileMetadata)}
-    except Exception as e:
-        st.error(f"Error accessing Dropbox: {e}")
-        return {}
-
-# --- 3. UI LAYOUT ---
-st.set_page_config(page_title="Dropbox Asset Checker", layout="wide")
-st.title("📂 Dropbox Asset Naming Validator")
+# --- UI ---
+st.set_page_config(page_title="Asset sync", layout="wide")
+st.title("📂 Bulk Dropbox Checker")
 
 with st.sidebar:
-    st.header("Setup")
-    # You can also move this to st.secrets for better security
-    dbx_token = st.secrets.get("DROPBOX_TOKEN", st.text_input("Dropbox Token", type="password"))
+    dbx_token = st.text_input("Dropbox Token", type="password")
     folder_path = "/Asset checker"
-    st.info(f"Checking Folder: `{folder_path}`")
 
-# Step 1: Input Naming Conventions
-st.subheader("1. Paste your Naming Conventions")
-raw_input = st.text_area("One filename per line (e.g., PROMO_1080x1080_EN.mp4)", height=200)
+# 1. Paste Input
+raw_input = st.text_area("Paste your bulk filenames here:", height=250)
 
-if st.button("🔍 Check Dropbox"):
+if st.button("🔍 Cross-Reference & Preview"):
     if not dbx_token:
-        st.error("Please provide a Dropbox Token.")
-    elif not raw_input:
-        st.warning("Please paste your filenames first.")
+        st.error("Missing Token!")
     else:
-        # Step 2: Get actual files from Dropbox
-        with st.spinner("Fetching data from Dropbox..."):
-            actual_files = scan_dropbox_folder(dbx_token, folder_path)
-        
-        # Step 3: Compare
-        expected_files = [line.strip() for line in raw_input.split('\n') if line.strip()]
-        results = []
-        
         dbx = dropbox.Dropbox(dbx_token)
         
-        for name in expected_files:
-            if name in actual_files:
-                path = actual_files[name]
-                preview_url = get_dropbox_preview(dbx, path)
-                results.append({"Filename": name, "Status": "✅ Found", "Path": path, "Preview": preview_url})
-            else:
-                results.append({"Filename": name, "Status": "❌ Missing", "Path": None, "Preview": None})
-
-        # Step 4: Display Results
-        df = pd.DataFrame(results)
+        # Step 1: Clean and split the bulk text
+        clean_names = split_filenames(raw_input)
         
-        for _, row in df.iterrows():
-            with st.expander(f"{row['Status']} | {row['Filename']}"):
-                if row['Status'] == "✅ Found":
-                    st.success(f"File exists at: `{row['Path']}`")
-                    if row['Preview']:
-                        # Display Image or Video based on extension
-                        ext = row['Filename'].lower().split('.')[-1]
-                        if ext in ['png', 'jpg', 'jpeg', 'gif']:
-                            st.image(row['Preview'], width=400)
-                        elif ext in ['mp4', 'mov']:
-                            st.video(row['Preview'])
-                        else:
-                            st.write("[Preview not supported for this file type]")
-                else:
-                    st.error("This file was not found in the 'Asset checker' folder. Please check for typos or underscores.")
+        # Step 2: Get everything currently in the 'Asset checker' folder
+        try:
+            folder_res = dbx.files_list_folder(folder_path)
+            # Create a dictionary of {lowercase_name: full_path} for easy lookup
+            actual_files = {entry.name.lower(): entry.path_display for entry in folder_res.entries}
+            
+            results = []
+            for name in clean_names:
+                match_path = actual_files.get(name.lower())
+                preview_url = get_direct_link(dbx, match_path) if match_path else None
+                
+                results.append({
+                    "Filename": name,
+                    "In Dropbox": "✅ Yes" if match_path else "❌ No",
+                    "Preview_URL": preview_url
+                })
 
-        st.download_button("Download Audit Report", df.to_csv(index=False), "dropbox_audit.csv")
+            # Step 3: Display results with Previews
+            for item in results:
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.write(f"**{item['Filename']}**")
+                    st.write(f"Status: {item['In Dropbox']}")
+                
+                with col2:
+                    if item['Preview_URL']:
+                        ext = item['Filename'].lower()
+                        if any(x in ext for x in ['.mp4', '.mov']):
+                            st.video(item['Preview_URL'])
+                        else:
+                            st.image(item['Preview_URL'], width=200)
+                    else:
+                        st.caption("No preview available")
+                st.divider()
+                
+        except Exception as e:
+            st.error(f"Dropbox Error: {e}")
