@@ -2,46 +2,70 @@ import streamlit as st
 import pandas as pd
 import dropbox
 import hmac
+import re
 
-# --- 1. ACCESS CONTROL (Hidden Secrets) ---
+# --- 1. SECURITY (Password Gate) ---
 def check_password():
     def password_entered():
         if hmac.compare_digest(st.session_state["password"], st.secrets["APP_PASSWORD"]):
             st.session_state["password_correct"] = True
             del st.session_state["password"]
-        else: st.session_state["password_correct"] = False
-    if st.session_state.get("password_correct", False): return True
-    st.title("🔒 Asset Checker Login")
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+    st.title("🔒 Asset Preview Checker")
     st.text_input("App Password", type="password", on_change=password_entered, key="password")
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+        st.error("😕 Password incorrect")
     return False
 
-if not check_password(): st.stop()
+if not check_password():
+    st.stop()
 
-# --- 2. DROPBOX PREVIEW LOGIC ---
+# --- 2. DROPBOX API LOGIC ---
 def get_preview_link(dbx, path):
+    """Generates a direct temporary link for st.video/st.image."""
     try:
-        # Generates direct stream link for video/image
+        # This bypasses the Dropbox UI to get the raw media stream
         return dbx.files_get_temporary_link(path).link
-    except: return None
+    except Exception:
+        return None
+
+def fetch_dropbox_files(token, folder_path):
+    """Builds a map of all files in the folder for fast lookup."""
+    dbx = dropbox.Dropbox(token)
+    try:
+        res = dbx.files_list_folder(folder_path)
+        # We store keys in lowercase and strip spaces to maximize match probability
+        return {entry.name.lower().strip(): entry.path_display for entry in res.entries if isinstance(entry, dropbox.files.FileMetadata)}
+    except Exception as e:
+        st.error(f"Dropbox Connection Error: {e}")
+        return {}
 
 # --- 3. UI LAYOUT ---
 st.set_page_config(page_title="Asset sync", layout="wide")
-st.title("📂 3-Column Bulk Asset Validator")
+st.title("📂 3-Column Asset Sync & Preview")
 
-# Fetch token from secrets (No UI input needed)
-DBX_TOKEN = st.secrets["DROPBOX_TOKEN"]
-FOLDER_PATH = "/Asset checker"
+# Pull credentials from Streamlit Secrets
+try:
+    DBX_TOKEN = st.secrets["DROPBOX_TOKEN"]
+    FOLDER_PATH = "/Asset checker"
+except Exception:
+    st.error("Missing 'DROPBOX_TOKEN' in Secrets! Please add it to your .streamlit/secrets.toml or Cloud Dashboard.")
+    st.stop()
 
-# Initialize 3-column table
+# Initialize the 3-column table state
 if "df_input" not in st.session_state:
     st.session_state.df_input = pd.DataFrame(
-        [{"Campaign": "", "Language": "", "Filename": ""}] * 15
+        [{"Campaign": "", "Language": "", "Filename": ""}] * 10
     )
 
-st.subheader("1. Paste your data below")
-st.caption("You can paste 3 columns directly from Excel/Sheets (e.g., Campaign | Lang | Filename)")
+st.subheader("1. Paste your data")
+st.caption("Paste 3 columns from Excel (Campaign | Language | Filename). Each file must be in its own row.")
 
-# 3-Column Editable Table
+# Editable Table
 edited_df = st.data_editor(
     st.session_state.df_input,
     num_rows="dynamic",
@@ -49,48 +73,71 @@ edited_df = st.data_editor(
     column_config={
         "Campaign": st.column_config.TextColumn(width="medium"),
         "Language": st.column_config.TextColumn(width="small"),
-        "Filename": st.column_config.TextColumn(width="large"),
+        "Filename": st.column_config.TextColumn(width="large", help="Paste the exact filename here"),
     }
 )
 
-if st.button("🔍 Check Dropbox & Generate Previews"):
+if st.button("🔍 Run Audit & Generate Previews"):
     dbx = dropbox.Dropbox(DBX_TOKEN)
-    try:
-        # Build lookup map of folder contents
-        files_res = dbx.files_list_folder(FOLDER_PATH)
-        actual_files = {entry.name.lower().strip(): entry.path_display for entry in files_res.entries}
+    
+    with st.spinner("Scanning Dropbox folder..."):
+        # Map filenames to paths to solve the 'Nothing Matching' issue
+        actual_files_map = fetch_dropbox_files(DBX_TOKEN, FOLDER_PATH)
+    
+    if not actual_files_map:
+        st.warning("No files found in Dropbox folder. Check the folder name or token permissions.")
+    else:
+        st.divider()
+        found_count = 0
+        total_rows = 0
         
-        # Process entries
+        # Iterate through the table entries
         for index, row in edited_df.iterrows():
-            filename = str(row["Filename"]).strip()
-            if not filename: continue # Skip empty rows
+            # Clean up the pasted filename
+            raw_filename = str(row["Filename"]).strip()
+            if not raw_filename:
+                continue
             
-            match_path = actual_files.get(filename.lower())
+            total_rows += 1
+            # Normalize for matching
+            lookup_key = raw_filename.lower()
+            match_path = actual_files_map.get(lookup_key)
+            
+            # Generate the specific preview link for this file
             preview_url = get_preview_link(dbx, match_path) if match_path else None
             
-            # Display Results in Rows
-            with st.container():
-                col1, col2, col3 = st.columns([1, 2, 2])
-                
-                with col1:
-                    if match_path:
-                        st.success("✅ FOUND")
+            # Create a display row
+            col1, col2, col3 = st.columns([1, 3, 3])
+            
+            with col1:
+                if preview_url:
+                    st.success("✅ FOUND")
+                    found_count += 1
+                else:
+                    st.error("❌ MISSING")
+            
+            with col2:
+                st.markdown(f"**Campaign:** {row['Campaign']}")
+                st.markdown(f"**Lang:** {row['Language']}")
+                st.code(raw_filename)
+                if match_path:
+                    st.caption(f"Dropbox Path: {match_path}")
+
+            with col3:
+                if preview_url:
+                    # Determine if it's a video or image based on extension
+                    ext = raw_filename.lower()
+                    if any(x in ext for x in [".mp4", ".mov"]):
+                        st.video(preview_url)
+                    elif any(x in ext for x in [".png", ".jpg", ".jpeg", ".gif"]):
+                        st.image(preview_url, use_container_width=True)
                     else:
-                        st.error("❌ MISSING")
-                
-                with col2:
-                    st.markdown(f"**{row['Campaign']}** ({row['Language']})")
-                    st.code(filename)
-                
-                with col3:
-                    if preview_url:
-                        if any(ext in filename.lower() for ext in [".mp4", ".mov"]):
-                            st.video(preview_url)
-                        else:
-                            st.image(preview_url, use_container_width=True)
-                    else:
-                        st.info("No Preview Available")
-                st.divider()
-                
-    except Exception as e:
-        st.error(f"Dropbox Error: {e}")
+                        st.info("Preview not supported for this file type.")
+                else:
+                    st.warning("No Preview Available: Check for typos or special characters.")
+            
+            st.divider()
+        
+        # Summary Metric
+        if total_rows > 0:
+            st.metric("Sync Rate", f"{(found_count/total_rows)*100:.1f}%", f"{found_count} of {total_rows} found")
