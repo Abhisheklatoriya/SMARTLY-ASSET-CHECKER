@@ -2,42 +2,39 @@ import streamlit as st
 import dropbox
 from dropbox.exceptions import ApiError
 
-st.title("📦 Smartly File Matcher")
+st.set_page_config(page_title="Smartly Asset Checker", layout="wide")
 
-# Sidebar for Configuration
-with st.sidebar:
-    st.header("Settings")
-    dbx_token = st.text_input("Enter Dropbox Access Token", type="password")
-    st.info("Note: Your app is restricted to the 'Smartly' App folder.")
+st.title("📦 Smartly Asset Checker")
 
-if not dbx_token:
-    st.warning("Please enter your Dropbox Access Token to proceed.")
-else:
+# Retrieve the token from Streamlit Secrets
+try:
+    dbx_token = st.secrets["DROPBOX_TOKEN"]
     dbx = dropbox.Dropbox(dbx_token)
+except KeyError:
+    st.error("Missing secret: 'DROPBOX_TOKEN'. Please add it to your Streamlit App Secrets.")
+    st.stop()
 
-    # 1. File Upload Section
-    st.subheader("Upload Local Files")
-    uploaded_files = st.file_uploader("Drop files here to check against Dropbox", accept_multiple_files=True)
+# File Upload Section
+uploaded_files = st.file_uploader("Upload files to check against Dropbox", accept_multiple_files=True)
 
-    if uploaded_files:
-        try:
-            # IMPORTANT: For "App folder" access, use '' to refer to the folder itself
-            res = dbx.files_list_folder('')
+if uploaded_files:
+    try:
+        # Since you use 'App Folder' access, '' refers to the root of that specific folder
+        res = dbx.files_list_folder('')
+        
+        # Get all filenames currently in the Dropbox folder
+        dbx_filenames = {entry.name for entry in res.entries if isinstance(entry, dropbox.files.FileMetadata)}
+
+        st.subheader("Comparison Results")
+        
+        for file in uploaded_files:
+            col1, col2 = st.columns([3, 1])
+            col1.text(file.name)
             
-            # Create a set of filenames currently in the 'Smartly' folder
-            dropbox_filenames = {entry.name for entry in res.entries if isinstance(entry, dropbox.files.FileMetadata)}
-            
-            st.divider()
-            st.subheader("Results")
-
-            for file in uploaded_files:
-                col1, col2 = st.columns([3, 1])
-                col1.text(file.name)
+            if file.name in dbx_filenames:
+                col2.success("Matched ✅")
+            else:
+                col2.error("Not Matched ❌")
                 
-                if file.name in dropbox_filenames:
-                    col2.success("Matched")
-                else:
-                    col2.error("Not Matched")
-                    
-        except ApiError as e:
-            st.error(f"Could not connect to Dropbox. Check if your token is valid. Error: {e}")
+    except ApiError as e:
+        st.error(f"Dropbox API Error: {e}")
