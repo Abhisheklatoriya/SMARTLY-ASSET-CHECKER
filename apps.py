@@ -9,18 +9,18 @@ try:
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
     dbx_creds = st.secrets["dropbox"]
 except KeyError as e:
-    st.error(f"Missing Secret Key: {e}. Please check your Streamlit Secrets configuration.")
+    st.error(f"Missing Secret Key: {e}. Please update your Streamlit Secrets.")
     st.stop()
 
 st.title("📦 Smartly Asset Checker")
 
-# 2. Simple Password Lock
+# 2. Sidebar Password
 user_pwd = st.sidebar.text_input("App Password", type="password")
 if user_pwd != APP_PASSWORD:
-    st.info("Please enter the password in the sidebar to access the checker.")
+    st.info("Enter the password to start.")
     st.stop()
 
-# 3. Initialize Dropbox with Refresh Token
+# 3. Initialize Dropbox
 @st.cache_resource
 def get_dbx_client():
     return Dropbox(
@@ -31,21 +31,21 @@ def get_dbx_client():
 
 dbx = get_dbx_client()
 
-# 4. File Comparison Logic
+# 4. File Comparison
 uploaded_files = st.file_uploader("Upload local files to verify", accept_multiple_files=True)
 
 if uploaded_files:
     try:
-        # In 'App Folder' mode, '' refers to the root of your 'Smartly asset checker' folder
-        res = dbx.files_list_folder('')
+        # Since you have FULL access, we specify the folder name exactly as it appears
+        # IMPORTANT: Dropbox paths must start with a forward slash '/'
+        FOLDER_PATH = '/Smartly' 
+        
+        res = dbx.files_list_folder(FOLDER_PATH)
         dbx_filenames = {entry.name for entry in res.entries if isinstance(entry, dropbox.files.FileMetadata)}
 
         st.divider()
-        st.subheader("Results")
+        st.subheader(f"Checking in Dropbox: {FOLDER_PATH}")
         
-        if not dbx_filenames:
-            st.warning("The Dropbox App Folder appears to be empty.")
-
         for file in uploaded_files:
             col1, col2 = st.columns([3, 1])
             col1.write(f"📄 {file.name}")
@@ -55,5 +55,7 @@ if uploaded_files:
             else:
                 col2.error("Missing ❌")
                 
+    except dropbox.exceptions.ApiError as e:
+        st.error(f"Could not find folder '{FOLDER_PATH}'. Ensure the folder exists in your Dropbox root.")
     except Exception as e:
-        st.error(f"Dropbox Error: {e}")
+        st.error(f"An unexpected error occurred: {e}")
